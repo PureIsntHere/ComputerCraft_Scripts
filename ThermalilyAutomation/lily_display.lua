@@ -1,10 +1,10 @@
 -- lily_display.lua
--- Shows all lily cooldowns received over rednet ("thermalily-status").
--- Uses a connected monitor if found; else draws in terminal.
+-- Receives status on "thermalily-status" and shows:
+--   Label | Lvl | ETA (to scheduled feed) | LastEvt | SinceFeed | ID
+-- Uses a monitor if present; otherwise prints to terminal.
 
 local PROTO = "thermalily-status"
 
--- Open any wireless modem
 local function openAnyWireless()
   for _, s in ipairs({"left","right","top","bottom","front","back"}) do
     if peripheral.getType(s) == "modem" and peripheral.call(s,"isWireless") then
@@ -16,11 +16,8 @@ local function openAnyWireless()
 end
 assert(openAnyWireless(), "Attach a wireless modem.")
 
--- Find an attached monitor (optional)
 local mon = peripheral.find("monitor")
-if mon then
-  pcall(function() mon.setTextScale(0.5) end)
-end
+if mon then pcall(function() mon.setTextScale(0.5) end) end
 
 local function cls()
   if mon then mon.clear() mon.setCursorPos(1,1) else term.clear() term.setCursorPos(1,1) end
@@ -35,51 +32,49 @@ local function writeAt(x,y,text,color)
   end
 end
 
-local lilies = {}  -- label -> {level, seconds, lastEvent, lastFired, id, updated}
-
-local function fmtSec(s)
-  local m = math.floor(s/60); local sec = math.floor(s%60)
-  return string.format("%02d:%02d", m, sec)
+local function mmss(sec)
+  if not sec or sec < 0 then sec = 0 end
+  local m = math.floor(sec/60); local s = math.floor(sec%60)
+  return string.format("%02d:%02d", m, s)
 end
+
+local lilies = {} -- label -> {level, readyAt, lastEvent, lastFired, id, updated}
 
 local function render()
   cls()
+  writeAt(1,1,"Thermalily Cooldowns (time-scheduled)", colors and colors.white)
+  writeAt(1,2,"Updated: "..textutils.formatTime(os.time(), true), colors and colors.lightGray)
+  writeAt(1,4,string.format("%-16s %-5s %-7s %-10s %-10s %-4s",
+    "Label","Lvl","ETA","LastEvt","SinceFeed","ID"), colors and colors.cyan)
+
+  local keys = {}
+  for k in pairs(lilies) do table.insert(keys, k) end
+  table.sort(keys)
+
   local now = os.epoch("local")
-  writeAt(1,1,"Thermalily Cooldowns", colors and colors.white)
-  writeAt(1,2,("Updated: %s"):format(textutils.formatTime(os.time(), true)), colors and colors.lightGray)
-
-  -- header
-  writeAt(1,4, string.format("%-16s %-5s %-8s %-10s %-6s","Label","Lvl","Time","LastEvt","Since"), colors and colors.cyan)
-
-  -- sort labels for stable order
-  local labels = {}
-  for k in pairs(lilies) do table.insert(labels, k) end
-  table.sort(labels)
-
   local row = 5
-  for _, label in ipairs(labels) do
-    local d = lilies[label]
+  for _, L in ipairs(keys) do
+    local d = lilies[L]
     local lvl = d.level or 0
-    local secs = d.seconds or (lvl*20)
-    local lastEvt = d.lastEvent or "-"
+    local eta = 0
+    if d.readyAt then eta = math.max(0, math.floor((d.readyAt - now)/1000)) end
     local since = "-"
-    if d.lastFired then since = fmtSec((now - d.lastFired)/1000) end
+    if d.lastFired then since = mmss((now - d.lastFired)/1000) end
 
-    -- color: green if ready, yellow mid, red high cooldown
     local col = colors and colors.white
     if colors then
-      if lvl == 0 then col = colors.lime
-      elseif lvl >= 10 then col = colors.red
-      else col = colors.yellow end
+      if eta == 0 then col = colors.lime         -- feeding now / due
+      elseif lvl >= 10 then col = colors.red     -- long cooldown
+      else col = colors.yellow                   -- short-mid cooldown
+      end
     end
 
-    writeAt(1,row, string.format("%-16s %-5d %-8s %-10s %-6s",
-      label, lvl, fmtSec(secs), lastEvt, since), col)
+    writeAt(1,row,string.format("%-16s %-5d %-7s %-10s %-10s %-4d",
+      L, lvl, mmss(eta), d.lastEvent or "-", since, d.id or 0), col)
     row = row + 1
   end
 end
 
--- Receive + refresh loop
 local lastDraw = 0
 while true do
   local id, msg, proto = rednet.receive(nil, 0.5)
@@ -88,8 +83,8 @@ while true do
     local rec = lilies[L] or {}
     rec.id = msg.id
     rec.level = msg.level or rec.level
-    rec.seconds = msg.seconds or rec.seconds
     rec.lastEvent = msg.event or rec.lastEvent
+    if msg.readyAt then rec.readyAt = msg.readyAt end
     if msg.event == "fired" then rec.lastFired = msg.time end
     rec.updated = os.epoch("local")
     lilies[L] = rec
